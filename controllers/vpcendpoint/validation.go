@@ -283,15 +283,32 @@ func (r *VpcEndpointReconciler) validatePrivateHostedZone(ctx context.Context, r
 	}
 
 	zoneOut, err := r.awsClient.GetDefaultPrivateHostedZoneId(ctx, resource.Spec.AddtlHostedZoneName)
-	if err != nil {
+	if zoneOut == nil {
+		r.log.V(0).Info("No hosted zone found for ", "domainName", resource.Spec.AddtlHostedZoneName)
+		zoneOut = &route53Types.HostedZone{Config: &route53Types.HostedZoneConfig{PrivateZone: false}}
+	} else if err != nil {
 		return fmt.Errorf("failed to locate private hosted zone: %s", err)
 	}
 
 	if zoneOut.Config.PrivateZone { // AddtlHostedZoneName found with a PrivateZone
-		r.log.V(1).Info("Found AddtlHostedZone's Route53 hosted zone", "domainName", zoneOut.Name)
+		r.log.V(1).Info("Identified Route53 hosted zone for AddtlHostedZoneName", "domainName", zoneOut.Name)
 		trimmedZoneID := strings.TrimPrefix(aws.ToString(zoneOut.Id), "/hostedzone/")
 		if err := r.createMissingPrivateZoneTags(ctx, trimmedZoneID); err != nil {
 			return fmt.Errorf("failed to tag hosted zone: %w", err)
+		}
+		resourceRecord, err := r.generateRoute53Record(ctx, resource)
+		if err != nil {
+			r.log.V(0).Info("Skipping Route53 Record, VPCEndpoint is not in the available state")
+			return nil
+		}
+		input := &route53Types.ResourceRecordSet{
+			Name:            aws.String(fmt.Sprintf("%s.%s", resource.Spec.SubdomainName, resource.Spec.AddtlHostedZoneName)),
+			Type:            route53Types.RRTypeCname,
+			ResourceRecords: []route53Types.ResourceRecord{*resourceRecord},
+			TTL:             aws.Int64(300),
+		}
+		if _, err := r.awsClient.UpsertResourceRecordSet(ctx, input, trimmedZoneID); err != nil {
+			return err
 		}
 		r.log.V(1).Info("Private Hosted Zone validated", "domainName", zoneOut.Name)
 		return nil
